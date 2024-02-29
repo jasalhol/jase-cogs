@@ -1,2 +1,2 @@
-# cogs
+# jase-cogs
 cogs for redbot

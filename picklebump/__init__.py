@@ -1,8 +1,7 @@
 """
 MIT License
 
-Copyright (c) 2020-2023 PhenoM4n4n
-Copyright (c) 2023-present japandotorg
+Copyright (c) 2023-present jase
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -25,11 +24,11 @@ SOFTWARE.
 
 from redbot.core.utils import get_end_user_data_statement
 
-from .core import DisboardReminder
+from .core import Picklebump
 
 __red_end_user_data_statement__ = get_end_user_data_statement(__file__)
 
 
-async def setup(bot):
-    cog = DisboardReminder(bot)
-    await bot.add_cog(cog)
+def setup(bot):
+    cog = Picklebump(bot)
+    bot.add_cog(cog)

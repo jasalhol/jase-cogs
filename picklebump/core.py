@@ -1,8 +1,33 @@
+"""
+MIT License
+
+Copyright (c) 2020-2023 PhenoM4n4n
+Copyright (c) 2023-present japandotorg
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
 import asyncio
 import logging
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import (
     Any,
     Coroutine,
@@ -28,12 +53,12 @@ from redbot.core.utils.chat_formatting import box
 from .converters import FuzzyRole
 from .models import LocalizedMessageValidator
 
-log: logging.Logger = logging.getLogger("red.seina.picklebumper")
+log: logging.Logger = logging.getLogger("red.picklebump.core")
 
 RequestType: TypeAlias = Literal["discord_deleted_user", "owner", "user", "user_strict"]
 
 DISCORD_BOT_ID: Final[int] = 302050872383242240
-LOCK_REASON: Final[str] = "Picklebumper auto-lock"
+LOCK_REASON: Final[str] = "Picklebump auto-lock"
 MENTION_RE: Pattern[str] = re.compile(r"<@!?(\d{15,20})>")
 BUMP_RE: Pattern[str] = re.compile(r"!d bump\b")
 
@@ -45,9 +70,9 @@ DEFAULT_GUILD_THANKYOU_MESSAGE: Final[str] = (
 )
 
 
-class Picklebumper(commands.Cog):
+class Picklebump(commands.Cog):
     """
-    Set a reminder to bump on Disboard.
+    Set a reminder to bump on PickleJar on Runescape Discord.
     """
 
     __version__: Final[str] = "1.3.7"
@@ -75,7 +100,7 @@ class Picklebumper(commands.Cog):
         self.bump_tasks: DefaultDict[int, Dict[str, asyncio.Task]] = defaultdict(dict)
 
         try:
-            bot.add_dev_env_value("picklebumper", lambda x: self)
+            bot.add_dev_env_value("picklebump", lambda x: self)
         except RuntimeError:
             pass
 
@@ -102,7 +127,7 @@ class Picklebumper(commands.Cog):
 
     def __unload(self) -> None:
         try:
-            self.bot.remove_dev_env_value("picklebumper")
+            self.bot.remove_dev_env_value("picklebump")
         except KeyError:
             pass
         if self.bump_loop:
@@ -139,142 +164,203 @@ class Picklebumper(commands.Cog):
 
     def process_tagscript(
         self, content: str, *, seed_variables: Dict[str, Any] = {}
-    ) -> Union[str, discord.Embed]:
+    ) -> Dict[str, Any]:
+        output = self.tagscript_engine.process(content, seed_variables)
+        kwargs: Dict[str, Any] = {}
+        if output.body:
+            kwargs["content"] = output.body[:2000]
+        if embed := output.actions.get("embed"):
+            kwargs["embed"] = embed
+        return kwargs
+
+    async def initialize(self) -> None:
+        async for guild_id, guild_data in AsyncIter(
+            (await self.config.all_guilds()).items(), steps=100
+        ):
+            if not guild_id or not guild_data:
+                continue
+            channel_id: Optional[int] = guild_data.get("channel")
+            if channel_id:
+                self.channel_cache[guild_id] = channel_id
+
+    async def bump_check_loop(self) -> None:
+        await self.bot.wait_until_ready()
+        while True:
+            async for guild_id, guild_data in AsyncIter(
+                (await self.config.all_guilds()).items(), steps=100
+            ):
+                if not guild_id or not guild_data:
+                    continue
+                channel_id: Optional[int] = guild_data.get("channel")
+                role_id: Optional[int] = guild_data.get("role")
+                message: str = guild_data.get("message", DEFAULT_GUILD_MESSAGE)
+                ty_message: str = guild_data.get(
+                    "ty_message", DEFAULT_GUILD_THANKYOU_MESSAGE
+                )
+                if not channel_id:
+                    continue
+
+                channel: Optional[discord.TextChannel] = self.bot.get_channel(channel_id)
+                if not channel:
+                    log.warning(
+                        "Cannot find channel %s in guild %s. Skipping bump.",
+                        channel_id,
+                        guild_id,
+                    )
+                    continue
+
+                role: Optional[discord.Role] = (
+                    channel.guild.get_role(role_id) if role_id else None
+                )
+
+                if not role:
+                    log.warning(
+                        "Cannot find role %s in guild %s. Skipping bump.",
+                        role_id,
+                        guild_id,
+                    )
+                    continue
+
+                now: datetime = datetime.now(timezone.utc)
+                next_bump: Optional[datetime] = guild_data.get("next_bump")
+                if not next_bump or now >= next_bump:
+                    bump_task: asyncio.Task[discord.Message] = self.create_task(
+                        self.bump(guild_id, channel, role, message, ty_message), name="Bump Task"
+                    )
+                    self.bump_tasks[guild_id]["bump"] = bump_task
+                    await bump_task
+                    await asyncio.sleep(1)
+                    continue
+
+                delta: float = (next_bump - now).total_seconds()
+                await asyncio.sleep(delta)
+
+    async def bump(
+        self,
+        guild_id: int,
+        channel: discord.TextChannel,
+        role: discord.Role,
+        message: str,
+        ty_message: str,
+    ) -> discord.Message:
+        if not channel.permissions_for(channel.guild.me).send_messages:
+            log.warning(
+                "I don't have permission to send messages to %s in guild %s. Skipping bump.",
+                channel.id,
+                guild_id,
+            )
+            return
+
+        log.info(
+            "Sending bump message to %s in guild %s. Role: %s, Message: %s",
+            channel.id,
+            guild_id,
+            role.name,
+            message,
+        )
+
+        async with channel.typing():
+            bump_message: Optional[discord.Message] = None
+            try:
+                bump_message = await channel.send(
+                    content=message, allowed_mentions=discord.AllowedMentions.none()
+                )
+            except discord.Forbidden:
+                log.warning(
+                    "I don't have permission to send messages to %s in guild %s. Skipping bump.",
+                    channel.id,
+                    guild_id,
+                )
+                return
+
+            bump_task: asyncio.Task[discord.Message] = self.create_task(
+                self.wait_for_bump(guild_id, bump_message), name="Wait for Bump Task"
+            )
+            self.bump_tasks[guild_id]["wait"] = bump_task
+            await bump_task
+            await asyncio.sleep(1)
+
+            async for member in AsyncIter(
+                role.members, steps=10, exceptions=discord.Forbidden
+            ):
+                try:
+                    await member.send(
+                        content=self.process_tagscript(ty_message, seed_variables={"guild": guild}),
+                        allowed_mentions=discord.AllowedMentions(users=[member]),
+                    )
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+            next_bump: datetime = datetime.now(timezone.utc)  # type: ignore
+            next_bump += timedelta(hours=2)
+            await self.config.guild_from_id(guild_id).next_bump.set(next_bump)
+            return bump_message
+
+    async def wait_for_bump(
+        self, guild_id: int, bump_message: discord.Message
+    ) -> Optional[discord.Message]:
+        def check(m: discord.Message) -> bool:
+            return m.author.id == DISCORD_BOT_ID and BUMP_RE.search(m.content)
+
         try:
-            result = self.tagscript_engine.run(content, seed_variables=seed_variables)
-            if isinstance(result, discord.Embed):
-                return result
-            return str(result)
-        except Exception as exc:
-            log.error("An error occurred while processing TagScript.", exc_info=exc)
-            return "An error occurred while processing the TagScript content."
+            bump = await self.bot.wait_for("message", check=check, timeout=15 * 60)
+        except asyncio.TimeoutError:
+            log.warning(
+                "No bump detected for message %s in guild %s. Stopping.",
+                bump_message.id,
+                guild_id,
+            )
+            return
+
+        return bump
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        await self.check_bump(message)
+        if message.author.id == DISCORD_BOT_ID and BUMP_RE.search(message.content):
+            log.info(
+                "Disboard bump message detected in %s. Starting cooldown...",
+                message.channel.id,
+            )
+            await asyncio.sleep(2 * 60 * 60)
+            log.info("Cooldown ended for %s. Bump ready.", message.channel.id)
+            await message.add_reaction("🍆")
 
-    @commands.Cog.listener()
-    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
-        if payload.guild_id is None:
-            return
-        channel_id = payload.channel_id
-        guild_id = payload.guild_id
-        channel: discord.TextChannel = self.bot.get_channel(channel_id)
-        if channel is None:
-            return
-        try:
-            message: discord.Message = await channel.fetch_message(payload.message_id)
-        except discord.NotFound:
-            return
-        if not message.author.bot:
-            await self.check_bump(message)
-
-    async def check_bump(self, message: discord.Message) -> None:
-        if message.author.bot:
-            return
-        if message.guild is None:
-            return
-        if message.guild.me is None:
-            return
-        if message.guild.me.id != message.author.id:
-            return
-        if BUMP_RE.search(message.content):
-            await self.bump(message)
-
-    async def bump(self, message: discord.Message) -> None:
-        channel: discord.TextChannel = message.channel
-        guild: discord.Guild = channel.guild
-        log.debug("Bump detected in channel %s of guild %s.", channel.id, guild.id)
-        try:
-            await message.add_reaction("👍")
-        except discord.Forbidden:
-            pass
-        except discord.HTTPException:
-            pass
-        try:
-            bump_task: asyncio.Task = self.bump_tasks[guild.id][channel.id]
-            bump_task.cancel()
-        except KeyError:
-            pass
-        self.bump_tasks[guild.id][channel.id] = self.create_task(self.set_next_bump(guild, channel))
-
-    async def set_next_bump(self, guild: discord.Guild, channel: discord.TextChannel) -> None:
-        async with self.config.guild(guild).next_bump() as next_bump:
-            next_bump = datetime.utcnow() + timedelta(hours=2)
-        await self.update_bump(guild, channel, next_bump)
-
-    async def update_bump(
-        self, guild: discord.Guild, channel: discord.TextChannel, next_bump: datetime
-    ) -> None:
-        bump_time = next_bump - datetime.utcnow()
-        await asyncio.sleep(bump_time.total_seconds())
-        await self.send_reminder(guild, channel)
-
-    async def send_reminder(self, guild: discord.Guild, channel: discord.TextChannel) -> None:
-        bump_message = await self.config.guild(guild).message()
-        if bump_message is None:
-            return
-        await channel.send(bump_message)
-
-    @commands.group(name="picklebump", aliases=["pb"])
-    async def _pickle_bump(self, _: commands.Context):
+    @commands.group()
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_channels=True)
+    async def picklebumpset(self, ctx: commands.Context) -> None:
         """
-        Set a reminder to bump on Disboard.
-
-        This sends a reminder to bump in a specified channel 2 hours after someone successfully bumps, thus making it more accurate than a repeating schedule.
+        Set up picklebump.
         """
+        pass
 
-    @_pickle_bump.command(name="start")
-    async def pickle_bump_start(
-        self,
-        ctx: commands.Context,
-        interval: int,
-        channel: discord.TextChannel,
-        *,
-        message: str,
+    @picklebumpset.command(name="channel")
+    async def set_channel(
+        self, ctx: commands.Context, channel: discord.TextChannel
     ) -> None:
         """
-        Start a reminder for bumping.
+        Set the channel where picklebump will send reminders.
         """
         await self.config.guild(ctx.guild).channel.set(channel.id)
-        await self.config.guild(ctx.guild).message.set(message)
-        await ctx.send(
-            f"The reminder has been started! I'll send '{message}' to {channel.mention} every {interval} hours."
-        )
+        await ctx.send(f"Picklebump channel set to {channel.mention}.")
 
-    @_pickle_bump.command(name="stop")
-    async def pickle_bump_stop(self, ctx: commands.Context) -> None:
+    @picklebumpset.command(name="role")
+    async def set_role(self, ctx: commands.Context, role: FuzzyRole) -> None:
         """
-        Stop the reminder for bumping.
+        Set the role to ping when sending reminders.
         """
-        await self.config.guild(ctx.guild).channel.clear()
-        await self.config.guild(ctx.guild).message.clear()
-        await ctx.send("The reminder has been stopped!")
+        await self.config.guild(ctx.guild).role.set(role.id)
+        await ctx.send(f"Picklebump role set to {role.name}.")
 
-    async def initialize(self) -> None:
-        await self.bot.wait_until_ready()
-        for guild in self.bot.guilds:
-            await self.initialize_guild(guild)
+    @commands.command()
+    async def pbump(self, ctx: commands.Context) -> None:
+        """
+        Bump your server.
+        """
+        await ctx.send("No longer supported.")
 
-    async def initialize_guild(self, guild: discord.Guild) -> None:
-        if guild.me is None:
-            return
-        try:
-            channel_id = await self.config.guild(guild).channel()
-            if channel_id:
-                channel: discord.TextChannel = guild.get_channel(channel_id)
-                if channel:
-                    bump_message = await self.config.guild(guild).message()
-                    interval = await self.config.guild(guild).interval()
-                    if bump_message and interval:
-                        self.bump_tasks[guild.id][channel.id] = self.create_task(
-                            self.set_next_bump(guild, channel)
-                        )
-        except Exception as exc:
-            log.exception(
-                "An error occurred while initializing the guild %s. Version: %s",
-                guild.id,
-                self.__version__,
-                exc_info=exc,
-            )
+
+def setup(bot: Red) -> None:
+    cog = Picklebump(bot)
+    bot.add_cog(cog)
 

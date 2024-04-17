@@ -1,0 +1,19 @@
+{
+    "name": "Picklebumper",
+    "short" : "Set a reminder to bump PickleJar on Runescape Discord.",
+    "description" : "Set a reminder to bump PickleJar on Runescape Discord.",
+    "end_user_data_statement": "This cog does not persistently store any data or metadata about users.",
+    "install_msg": "Thank you for installing Picklebumper.",
+    "author": [
+        "inthedark.org",
+        "PhenoM4n4n"
+    ],
+    "required_cogs": {},
+    "requirements": ["unidecode", "rapidfuzz", "AdvancedTagScriptEngine"],
+    "tags": ["Pickles", "Reminder"],
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 10, 0],
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
